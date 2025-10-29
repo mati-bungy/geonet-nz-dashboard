@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GeoNet — NZ Quakes Dashboard</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    :root {
+      --sidebar-w: 380px;
+      --gap: 8px;
+      --bg: #0b0f13;
+      --card: #121821;
+      --muted: #94a3b8;
+      --text: #e2e8f0;
+      --accent: #38bdf8;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    .wrap { display: grid; grid-template-columns: 1fr var(--sidebar-w); height: 100%; }
+    #map { width: 100%; height: 100%; }
+    aside { width: var(--sidebar-w); height: 100%; border-left: 1px solid #1e293b; background: var(--card); display: flex; flex-direction: column; }
+    header { padding: 12px; border-bottom: 1px solid #1e293b; display: flex; align-items: center; gap: 8px; }
+    header h1 { font-size: 16px; margin: 0; }
+    header .meta { margin-left: auto; font-size: 12px; color: var(--muted); }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); padding: 12px; border-bottom: 1px solid #1e293b; }
+    .controls label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
+    .controls input { width: 100%; padding: 8px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: var(--text); }
+    .list { overflow: auto; padding: 8px 8px 16px; }
+    .item { padding: 10px 12px; border: 1px solid #223042; background: #0f1620; border-radius: 12px; margin: 8px; }
+    .row { display: flex; align-items: center; gap: 8px; }
+    .mag { font-weight: 700; }
+    .loc { color: #cbd5e1; }
+    .time { color: var(--muted); font-size: 12px; margin-left: auto; }
+    .sub { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .item a { color: var(--accent); text-decoration: none; }
+    .pill { border: 1px solid #334155; border-radius: 999px; padding: 2px 8px; font-size: 11px; color: var(--muted); }
+    .legend { position: absolute; right: calc(var(--sidebar-w) + 12px); top: 12px; z-index: 800; background: #0f1620; border: 1px solid #223042; color: var(--text); padding: 8px 10px; border-radius: 10px; }
+    .legend .row { gap: 6px; }
+    .legend .key { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="map"></div>
+    <aside>
+      <header>
+        <h1>NZ Quakes</h1>
+        <span id="count" class="pill">0 shown</span>
+        <span id="refreshed" class="meta">—</span>
+      </header>
+      <div class="controls">
+        <label>Min magnitude
+          <input id="minMag" type="number" step="0.1" value="3.5" />
+        </label>
+        <label>Hours window
+          <input id="hoursWindow" type="number" step="1" value="24" />
+        </label>
+      </div>
+      <div id="list" class="list" aria-live="polite"></div>
+    </aside>
+  </div>
+
+  <div class="legend">
+    <div class="row"><span class="key" style="background:#10b981"></span><span>M < 4</span></div>
+    <div class="row"><span class="key" style="background:#f59e0b"></span><span>4–4.9</span></div>
+    <div class="row"><span class="key" style="background:#ef4444"></span><span>≥ 5</span></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    // NZ geographic clamp
+    const NZ_BOUNDS = L.latLngBounds([[-47.5, 165.0], [-34.0, 179.0]]);
+
+    // Map
+    const map = L.map('map', {
+      maxBounds: NZ_BOUNDS.pad(0.15),
+      maxBoundsViscosity: 1.0,
+      zoomControl: true,
+      worldCopyJump: false
+    }).setView([-41.2, 173.0], 5);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    let quakeLayer = L.layerGroup().addTo(map);
+
+    const minMagEl = document.getElementById('minMag');
+    const hoursEl = document.getElementById('hoursWindow');
+    const listEl = document.getElementById('list');
+    const countEl = document.getElementById('count');
+    const refreshedEl = document.getElementById('refreshed');
+
+    // Browser Notifications
+    if ('Notification' in window && Notification.permission !== 'granted') {
+      Notification.requestPermission();
+    }
+    const lastNotified = new Set();
+    function notify(it) {
+      if (!('Notification' in window)) return;
+      if (Notification.permission !== 'granted') return;
+      if (lastNotified.has(it.id)) return;
+      new Notification(`M${it.mag.toFixed(1)} — ${it.loc}`, {
+        body: `Time: ${fmtTime(it.time)} | Depth: ${it.depth ?? '—'} km`,
+        icon: 'https://www.geonet.org.nz/favicon.ico'
+      });
+      lastNotified.add(it.id);
+    }
+
+    const seen = new Set(); // optional de-dup within a session
+
+    function colorForMag(m) {
+      if (m >= 5) return '#ef4444';
+      if (m >= 4) return '#f59e0b';
+      return '#10b981';
+    }
+
+    function withinNZ(lat, lng) { return NZ_BOUNDS.contains([lat, lng]); }
+
+    function fmtTime(iso) { try { return new Date(iso).toLocaleString(); } catch { return String(iso); } }
+
+    function renderList(items) {
+      listEl.innerHTML = '';
+      for (const it of items) {
+        const a = document.createElement('article');
+        a.className = 'item';
+        a.innerHTML = `
+          <div class="row">
+            <div class="mag">M${it.mag.toFixed(1)}</div>
+            <div class="loc">${it.loc}</div>
+            <div class="time">${fmtTime(it.time)}</div>
+          </div>
+          <div class="sub">Depth ${it.depth ?? '—'} km · <a href="${it.url}" target="_blank" rel="noopener">details</a></div>
+        `;
+        listEl.appendChild(a);
+      }
+      countEl.textContent = `${items.length} shown`;
+      refreshedEl.textContent = new Date().toLocaleTimeString();
+    }
+
+    function renderMap(items) {
+      quakeLayer.clearLayers();
+      for (const it of items) {
+        const c = colorForMag(it.mag);
+        const marker = L.circleMarker([it.lat, it.lng], {
+          radius: Math.max(4, Math.min(12, it.mag * 2.2)),
+          color: c,
+          fillColor: c,
+          fillOpacity: 0.8,
+          weight: 1
+        }).bindPopup(`<b>M${it.mag.toFixed(1)}</b> — ${it.loc}<br>${fmtTime(it.time)}<br><a href="${it.url}" target="_blank" rel="noopener">GeoNet</a>`);
+        marker.addTo(quakeLayer);
+      }
+    }
+
+    async function fetchQuakes() {
+      const url = 'https://api.geonet.org.nz/quake?MMI=1';
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error('GeoNet API error');
+      const data = await r.json();
+      const now = Date.now();
+      const maxAgeMs = Number(hoursEl.value || 24) * 3600 * 1000;
+      const minMag = Number(minMagEl.value || 0);
+
+      const items = [];
+      for (const f of data.features || []) {
+        const p = f.properties || {};
+        const g = f.geometry || {};
+        const coords = Array.isArray(g.coordinates) ? g.coordinates : [];
+        const lng = Number(coords[0]);
+        const lat = Number(coords[1]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+        if (!withinNZ(lat, lng)) continue; // clamp to NZ region
+
+        const mag = Number(p.magnitude ?? 0);
+        if (mag < minMag) continue;
+
+        const tIso = p.time || p.origintime;
+        const t = tIso ? new Date(tIso).getTime() : NaN;
+        if (!Number.isFinite(t) || now - t > maxAgeMs) continue;
+
+        const id = p.publicID || `${lat},${lng},${t}`;
+        if (seen.has(id)) {
+          // skip duplicates from earlier poll; leave seen add below so we still display on first run
+        }
+
+        const url = p.publicID ? `https://www.geonet.org.nz/earthquake/${p.publicID}` : '#';
+        items.push({ id, mag, lat, lng, time: tIso, depth: p.depth, loc: p.locality || p.region || 'NZ', url });
+        notify({ id, mag, loc: p.locality || p.region || 'NZ', time: tIso, depth: p.depth });
+        seen.add(id);
+      }
+
+      // newest first
+      items.sort((a, b) => new Date(b.time) - new Date(a.time));
+      renderMap(items);
+      renderList(items);
+    }
+
+    let timer = null;
+    async function refreshLoop() {
+      try { await fetchQuakes(); } catch (e) { console.error(e); }
+      timer = setTimeout(refreshLoop, 60_000); // 60 s
+    }
+
+    // React to control changes immediately
+    minMagEl.addEventListener('change', fetchQuakes);
+    hoursEl.addEventListener('change', fetchQuakes);
+
+    refreshLoop();
+  </script>
+</body>
+</html>
